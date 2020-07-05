@@ -13,11 +13,6 @@ from collections import deque
 import matplotlib.pyplot as plt
 import math
 
-# from pycallgraph import PyCallGraph
-# from pycallgraph.output import GraphvizOutput
-
-# def code_to_profile():
-
 attractive_gain = 4.0
 repulsive_gain = 250.0
 GRID_WIDTH_X = 70.0  # m
@@ -122,8 +117,7 @@ def potential_field_planning(sx, sy, gx, gy, ox, oy, resolution, robot_radius):
         ix_.append(ix)
         iy_.append(iy)
 
-        if len(ix_) > 70:
-            # cannot find the path
+        if len(ix_) > 50:
             status = False
             break
 
@@ -158,9 +152,9 @@ def Grid2World(path):
 
 use_Referee = True
 if use_Referee:
-    scene = "../scenarios/MyScenario2.g"  # Gabor change here according to your path
+    scene = "../scenarios/MyScenario2.g"
 else:
-    scene = "../scenarios/MyScenario.g"  # Gabor change here according to your path
+    scene = "../scenarios/MyScenario.g"
 
 pts = deque(maxlen=5)
 ptsRef = deque(maxlen=5)
@@ -185,7 +179,7 @@ class PlayGame:
         self.ox = [23., 23., 24., 25.0, 26.0, 27.0, 43.0, 44.0, 45.0, 46.0, 26., 42.]
         self.oy = [22., 23., 26.5, 22.5, 26.5, 23.5, 26.5, 23.5, 26.5, 22., 21., 21.]
 
-        self.tau_grab_tools = 0.1
+        self.tau_grab_tools = 0.05
 
     def setUpSimulation(self):
         self.RealWorld = ry.Config()
@@ -216,10 +210,16 @@ class PlayGame:
         self.S.addSensor("Refcamera", "Ref_gripperCamera", 640, 360, 1.)
         self.S.selectSensor("camera")
 
+        self.leftScore = 0
+        self.rightScore= 0
+
+        self.position_threshold = 0.1#  0.05 # 9e-2 #distance from the tool to the ball 0.09
+        self.table_region = .15  # .1  #robot worspace
+
     def mainCamera(self):
         self.k += 1
         if self.cheat == False:
-            if self.k % 2 == 0:
+            if self.k % 5 == 0: #2
                 if self.use_VS:
                     self.S.selectSensor("camera")
                 [rgb1, depth1] = self.S.getImageAndDepth()
@@ -243,14 +243,23 @@ class PlayGame:
                     # here the ball is out, and we send trigger the referee to go after the ball
                     self.ball.setPosition(self.RealWorld.getFrame("target").getPosition())
 
-                if len(rgb1) > 0: cv.imshow('Main camera', rgb1)
+                if len(rgb1) > 0:
+                    font = cv.FONT_HERSHEY_SIMPLEX
+                    org = (270, 30)
+                    fontScale = 1
+                    color = (0, 255, 0)
+                    thickness = 4
+                    image = cv.putText(rgb1, '{} - {}'.format(self.rightScore, self.leftScore), org, font,
+                                        fontScale, color, thickness, cv.LINE_AA)
+                    cv.imshow('Main camera', image)
                 self.S.step([], 0.01, ry.ControlMode.none)
                 rv = cv.waitKey(33)
                 if rv == ord('q'):
                     print('Stop')
                     self.kill()
 
-    def refereeCamera(self, desired_radius=30.0):
+    def refereeCamera(self, desired_radius=30.0, move = False, compute_position=False):
+        world_position = None
         if self.use_VS:
             if self.k % 3 == 0:  # 10
                 self.S.selectSensor("Refcamera")
@@ -268,13 +277,18 @@ class PlayGame:
                     vel_J = np.dot(np.linalg.inv(Jv), err)
                     [_, J2] = self.C.evalFeature(ry.FS.position, ["Ref_gripperCenter"])
                     y2 = np.array([k * vel_J[0], -k * vel_J[2], -k * vel_J[1]])
-                    [y1, J1] = self.C.evalFeature(ry.FS.position, ["base_footprint"])
-                    y1 = y1 - [0., -1.5, 0.1]
+
                     [y3, J3] = self.RealWorld.evalFeature(ry.FS.quaternion, ["Ref_gripperCenter"])
                     y3 = np.array([y3 - self.refereeOrientation])
 
-                    y = np.block([y1, y2, y3])
-                    J = np.block([[J1], [J2], [J3]])
+                    if move:
+                        y = np.block([y2, y3])
+                        J = np.block([[J2], [J3]])
+                    else:
+                        [y1, J1] = self.C.evalFeature(ry.FS.position, ["base_footprint"])
+                        y1 = y1 - [0., -1.5, 0.1]
+                        y = np.block([y1, y2, y3])
+                        J = np.block([[J1], [J2], [J3]])
 
                     vel = J.T @ np.linalg.inv(J @ J.T + 1e-2 * np.eye(y.shape[1])) @ -y.T;
                     self.S.step(vel, 0.045, ry.ControlMode.velocity)
@@ -287,11 +301,18 @@ class PlayGame:
                         if thickness > 0:
                             cv.line(rgb2, ptsRef[i - 1], ptsRef[i], (0, 0, 255), thickness)
 
+                    if compute_position:
+                        u, v, z = c1, c2, depth2[int(c2), int(c1)]
+                        pt = np.array([u, v, z])
+                        world_position = perception.camera_to_world(pt, self.RealWorld.frame("Refcamera"), self.fxfypxpy)
+
                 if len(rgb2) > 0: cv.imshow('OPENCV - Refcamera', rgb2)
             rv = cv.waitKey(33)
             if rv == ord('q'):
                 print('Stop')
                 self.kill()
+
+        return world_position
 
     def setUpC(self):
         self.C = ry.Config()
@@ -323,7 +344,7 @@ class PlayGame:
             y = y - [1.]
             vel = J.T @ np.linalg.inv(J @ J.T + 1e-2 * np.eye(y.shape[0])) @ -y
             self.S.step(vel, self.tau, ry.ControlMode.velocity)
-            self.V.recopyMeshes(self.C)
+            #self.V.recopyMeshes(self.C)
             self.V.setConfiguration(self.C)
         [self.refereeOrientation, _] = self.RealWorld.evalFeature(ry.FS.quaternion, ["Ref_gripperCenter"])
 
@@ -336,6 +357,7 @@ class PlayGame:
         print('-KILLED-')
 
     def getTool_new(self, arm):
+        self.V.recopyMeshes(self.C)
         if arm == "L_gripper":
             [y2, _] = self.C.evalFeature(ry.FS.positionDiff, ["L_gripperCenter", "ring2"])
             while np.linalg.norm(y2) > 2e-3:  # go to position
@@ -344,7 +366,8 @@ class PlayGame:
                 time.sleep(0.01)
                 q = self.S.get_q()
                 self.C.setJointState(q)
-                self.V.setConfiguration(self.C)
+                if self.k % 10==0:
+                    self.V.setConfiguration(self.C)
                 [y1, J1] = self.C.evalFeature(ry.FS.vectorZ, ["L_gripperCenter"])
                 y1 = y1 - [0, 0, 1]
                 [y2, J2] = self.C.evalFeature(ry.FS.positionDiff, ["L_gripperCenter", "ring2"])
@@ -358,8 +381,8 @@ class PlayGame:
             while True:
                 time.sleep(0.01)
                 self.S.step([], self.tau_grab_tools, ry.ControlMode.none)
-                self.V.recopyMeshes(self.C)
-                self.V.setConfiguration(self.C)
+                if self.k % 10==0:
+                    self.V.setConfiguration(self.C)
                 if self.S.getGripperIsGrasping('L_gripper'):
                     print('Left robot got the tool')
                     break
@@ -374,7 +397,8 @@ class PlayGame:
                 time.sleep(0.01)
                 q = self.S.get_q()
                 self.C.setJointState(q)
-                self.V.setConfiguration(self.C)
+                if self.k % 10 == 0:
+                    self.V.setConfiguration(self.C)
                 [y1, J1] = self.C.evalFeature(ry.FS.vectorZ, ["R_gripperCenter"])
                 y1 = y1 - [0, 0, 1]
                 [y2, J2] = self.C.evalFeature(ry.FS.positionDiff, ["R_gripperCenter", "ring_2"])
@@ -388,8 +412,8 @@ class PlayGame:
             while True:
                 time.sleep(0.01)
                 self.S.step([], self.tau_grab_tools, ry.ControlMode.none)
-                self.V.recopyMeshes(self.C)
-                self.V.setConfiguration(self.C)
+                if self.k % 10 == 0:
+                    self.V.setConfiguration(self.C)
                 if self.S.getGripperIsGrasping('R_gripper'):
                     print('Right robot got the tool')
                     break
@@ -407,7 +431,8 @@ class PlayGame:
                 time.sleep(0.01)
                 q = self.S.get_q()
                 self.C.setJointState(q)  # set your robot model to match the real q
-                self.V.setConfiguration(self.C)
+                if self.k % 10 == 0:
+                    self.V.setConfiguration(self.C)
 
                 [y1, J1] = self.C.evalFeature(ry.FS.scalarProductYY, ["L_gripper", "base"])
                 y1 = y1 - [-1]
@@ -430,7 +455,8 @@ class PlayGame:
                 time.sleep(0.01)
                 q = self.S.get_q()
                 self.C.setJointState(q)  # set your robot model to match the real q
-                self.V.setConfiguration(self.C)
+                if self.k % 10 == 0:
+                    self.V.setConfiguration(self.C)
 
                 [y1, J1] = self.C.evalFeature(ry.FS.scalarProductYY, ["R_gripper", "base"])
                 y1 = y1 - [1]
@@ -459,24 +485,27 @@ class PlayGame:
             else:
                 p = self.ball.getPosition()
 
-            if p[0] < -.1:  # -0.17:  # ball is in the area of the left robot
+            if p[0] < -self.table_region:  # -0.17:  # ball is in the area of the left robot
                 ball_center, tried = 0, False
-                if p[0] < -1.0 or p[1] < -.55 or p[1] > .55:  # ball is ouside of the table
+                if p[0] < -1.1 or p[1] < -.55 or p[1] > .55:  # ball is ouside of the table
                     display('Right Robot win! ======================================= ')
                     leftWin = False
                     break
                 self.tau = 0.2
-                [rightR, _] = self.C.evalFeature(ry.FS.position, ["L_gripper"])
-                target = [p[0], p[1], rightR[2] - 0.01]
+                #[leftR, _] = self.C.evalFeature(ry.FS.position, ["L_gripper"])
+                #target = [p[0], p[1], leftR[2] - 0.01]
+                target = [p[0], p[1], 0.4]
 
                 self.C.setJointState(self.S.get_q())
                 [y3, _] = self.C.evalFeature(ry.FS.position, ["L_gripper"])
                 y3 = y3 - target
-                if np.linalg.norm(y3) > 9e-2:  # go to position =======================
+                if np.linalg.norm(y3) > self.position_threshold:  # go to position =======================
+                    print('==============================Left robot go to position==================================')
                     time.sleep(0.01)
                     q = self.S.get_q()
                     self.C.setJointState(q)
-                    self.V.setConfiguration(self.C)
+                    if self.k % 10 == 0:
+                        self.V.setConfiguration(self.C)
 
                     [y1, J1] = self.C.evalFeature(ry.FS.scalarProductXZ, ["L_gripper", "base"])
                     y1 = y1 - [.5]
@@ -490,6 +519,7 @@ class PlayGame:
                     vel = J.T @ np.linalg.inv(J @ J.T + 1e-2 * np.eye(y.shape[0])) @ -y
                     self.S.step(vel, self.tau, ry.ControlMode.velocity)
                 else:  # Hit the ball===================================================
+                    print('==============================Left robot hit==================================')
                     self.tau = 0.05
                     [y1, _] = self.C.evalFeature(ry.FS.scalarProductXZ, ["L_gripper", "base"])
                     y1 = y1 - [-1.]
@@ -497,7 +527,8 @@ class PlayGame:
                         time.sleep(0.01)
                         q = self.S.get_q()
                         self.C.setJointState(q)
-                        self.V.setConfiguration(self.C)
+                        if self.k % 10 == 0:
+                            self.V.setConfiguration(self.C)
 
                         [y1, J1] = self.C.evalFeature(ry.FS.scalarProductXZ, ["L_gripper", "base"])
                         y1 = y1 - [-1.]
@@ -505,10 +536,11 @@ class PlayGame:
                         y2 = y2 - [-1]
                         [y3, J3] = self.C.evalFeature(ry.FS.position, ["L_gripper"])
                         y3 = y3 - target
+
                         y = np.block([y1, y2, y3])
                         J = np.block([[J1], [J2], [J3]])
                         vel = J.T @ np.linalg.inv(J @ J.T + 1e-2 * np.eye(y.shape[0])) @ -y;
-                        self.S.step(vel, np.random.uniform(0.04, 0.065), ry.ControlMode.velocity)
+                        self.S.step(vel, np.random.uniform(0.05, 0.075), ry.ControlMode.velocity)
 
                 # right robot go ready----------------------------------------------
                 self.tau = 0.1
@@ -518,7 +550,8 @@ class PlayGame:
                     time.sleep(0.005)
                     q = self.S.get_q()
                     self.C.setJointState(q)  # set your robot model to match the real q
-                    self.V.setConfiguration(self.C)
+                    if self.k % 10 == 0:
+                        self.V.setConfiguration(self.C)
 
                     [y1, J1] = self.C.evalFeature(ry.FS.scalarProductYY, ["R_gripper", "base"])
                     y1 = y1 - [1]
@@ -536,24 +569,27 @@ class PlayGame:
                 # clear_output(wait=True)
                 # display('Left arm area--------------------------------------------------')
 
-            elif p[0] > .1:  # 0.17:  # the ball is in the area of the right robot
+            elif p[0] > self.table_region:  # 0.17:  # the ball is in the area of the right robot
                 ball_center, tried = 0, False
-                if p[0] > 1.0 or p[1] < -.55 or p[1] > .55:  # the ball is outside of the table
+                if p[0] > 1.1 or p[1] < -.55 or p[1] > .55:  # the ball is outside of the table
                     display('Left Robot win! =============================================')
                     leftWin = True
                     break
                 self.tau = 0.2
-                [rightR, _] = self.C.evalFeature(ry.FS.position, ["R_gripper"])
-                target = [p[0], p[1], rightR[2] - 0.01]
+                #[rightR, _] = self.C.evalFeature(ry.FS.position, ["R_gripper"])
+                #target = [p[0], p[1], rightR[2] - 0.01]
+                target = [p[0], p[1], 0.4]
 
                 self.C.setJointState(self.S.get_q())
                 [y3, _] = self.C.evalFeature(ry.FS.position, ["R_gripper"])
                 y3 = y3 - target
-                if np.linalg.norm(y3) > 9e-2:  # go to position============================
+                if np.linalg.norm(y3) > self.position_threshold:  # go to position============================
+                    print('==============================Right robot go to position==================================')
                     time.sleep(0.01)
                     q = self.S.get_q()
                     self.C.setJointState(q)
-                    self.V.setConfiguration(self.C)
+                    if self.k % 10 == 0:
+                        self.V.setConfiguration(self.C)
 
                     [y1, J1] = self.C.evalFeature(ry.FS.scalarProductXZ, ["R_gripper", "base"])
                     y1 = y1 - [.5]
@@ -568,6 +604,7 @@ class PlayGame:
                     self.S.step(vel, self.tau, ry.ControlMode.velocity)
 
                 else:  # hit the ball ==================================================
+                    print('==============================Right robot hit==================================')
                     self.tau = 0.05
                     [y1, _] = self.C.evalFeature(ry.FS.scalarProductXZ, ["R_gripper", "base"])
                     y1 = y1 - [-1.]
@@ -575,7 +612,8 @@ class PlayGame:
                         time.sleep(0.01)
                         q = self.S.get_q()
                         self.C.setJointState(q)
-                        self.V.setConfiguration(self.C)
+                        if self.k % 10 == 0:
+                            self.V.setConfiguration(self.C)
 
                         [y1, J1] = self.C.evalFeature(ry.FS.scalarProductXZ, ["R_gripper", "base"])
                         y1 = y1 - [-1.]
@@ -583,10 +621,11 @@ class PlayGame:
                         y2 = y2 - [1]
                         [y3, J3] = self.C.evalFeature(ry.FS.position, ["R_gripper"])
                         y3 = y3 - target
+
                         y = np.block([y1, y2, y3])
                         J = np.block([[J1], [J2], [J3]])
                         vel = J.T @ np.linalg.inv(J @ J.T + 1e-2 * np.eye(y.shape[0])) @ -y
-                        self.S.step(vel, np.random.uniform(0.04, 0.065), ry.ControlMode.velocity)
+                        self.S.step(vel, np.random.uniform(0.045, 0.075), ry.ControlMode.velocity)
 
                 # left robot go ready----------------------------------------------
                 self.tau = 0.1
@@ -596,7 +635,8 @@ class PlayGame:
                     time.sleep(0.005)
                     q = self.S.get_q()
                     self.C.setJointState(q)
-                    self.V.setConfiguration(self.C)
+                    if self.k % 10 == 0:
+                        self.V.setConfiguration(self.C)
 
                     [y1, J1] = self.C.evalFeature(ry.FS.scalarProductYY, ["L_gripper", "base"])
                     y1 = y1 - [-1]
@@ -618,9 +658,11 @@ class PlayGame:
                 time.sleep(0.01)
                 q = self.S.get_q()
                 self.C.setJointState(q)
-                self.V.setConfiguration(self.C)
+                if self.k % 10 == 0:
+                    self.V.setConfiguration(self.C)
                 self.S.step([], self.tau, ry.ControlMode.none)
-                if ball_center > 200:
+                print('==============================Ball center {}=================================='.format(ball_center))
+                if ball_center > 50:
                     if tried:
                         break
                     else:
@@ -630,13 +672,15 @@ class PlayGame:
                             self.rightR_Hit()
                         tried = True
 
-        if ball_center < 200:
+        if ball_center < 50:
             if leftWin:
+                self.leftScore += 1
                 self.takeFun('L')
             else:
+                self.rightScore += 1
                 self.takeFun('R')
         else:
-            print('equality-----------', ball_center)
+            print('==============================Equality {}=================================='.format(ball_center))
 
         return leftWin
 
@@ -670,7 +714,8 @@ class PlayGame:
                     time.sleep(0.01)
                     q = self.S.get_q()
                     self.C.setJointState(q)
-                    self.V.setConfiguration(self.C)
+                    if self.k % 10 == 0:
+                        self.V.setConfiguration(self.C)
 
                     [y1, J1] = self.C.evalFeature(ry.FS.scalarProductYY, ["L_gripper", "base"])
                     y1 = y1 - [-1]
@@ -692,7 +737,8 @@ class PlayGame:
                     time.sleep(0.01)
                     q = self.S.get_q()
                     self.C.setJointState(q)
-                    self.V.setConfiguration(self.C)
+                    if self.k % 10 == 0:
+                        self.V.setConfiguration(self.C)
 
                     [y1, J1] = self.C.evalFeature(ry.FS.scalarProductYY, ["R_gripper", "base"])
                     y1 = y1 - [1]
@@ -716,17 +762,27 @@ class PlayGame:
         while np.abs(y1) > 1e-2:
             self.refereeCamera()
             self.mainCamera()
+            if self.cheat:
+                p = self.RealWorld.getFrame('target').getPosition()
+            else:
+                p = self.ball.getPosition()
+
             time.sleep(0.01)
             q = self.S.get_q()
             self.C.setJointState(q)
-            self.V.setConfiguration(self.C)
+            if self.k % 10 == 0:
+                self.V.setConfiguration(self.C)
 
             [y1, J1] = self.C.evalFeature(ry.FS.scalarProductXZ, ["R_gripper", "base"])
             y1 = y1 - [-.5]
             [y2, J2] = self.C.evalFeature(ry.FS.scalarProductYY, ["R_gripper", "base"])
             y2 = y2 - [1]
-            y = np.block([y1, y2])
-            J = np.block([[J1], [J2]])
+            [y3, J3] = self.C.evalFeature(ry.FS.position, ["R_gripper"])
+            target = [p[0], p[1], 0.4]
+            y3 = y3 - target
+
+            y = np.block([y1, y2, y3])
+            J = np.block([[J1], [J2], [J3]])
             vel = J.T @ np.linalg.inv(J @ J.T + 1e-2 * np.eye(y.shape[0])) @ -y
             self.S.step(vel, self.tau, ry.ControlMode.velocity)
 
@@ -737,17 +793,26 @@ class PlayGame:
         while np.abs(y1) > 1e-2:
             self.refereeCamera()
             self.mainCamera()
+            if self.cheat:
+                p = self.RealWorld.getFrame('target').getPosition()
+            else:
+                p = self.ball.getPosition()
             time.sleep(0.01)
             q = self.S.get_q()
             self.C.setJointState(q)
-            self.V.setConfiguration(self.C)
+            if self.k % 10 == 0:
+                self.V.setConfiguration(self.C)
 
             [y1, J1] = self.C.evalFeature(ry.FS.scalarProductXZ, ["L_gripper", "base"])
             y1 = y1 - [-.5]
             [y2, J2] = self.C.evalFeature(ry.FS.scalarProductYY, ["L_gripper", "base"])
             y2 = y2 - [-1]
-            y = np.block([y1, y2])
-            J = np.block([[J1], [J2]])
+            [y3, J3] = self.C.evalFeature(ry.FS.position, ["L_gripper"])
+            target = [p[0], p[1], 0.4]
+            y3 = y3 - target
+
+            y = np.block([y1, y2, y3])
+            J = np.block([[J1], [J2], [J3]])
             vel = J.T @ np.linalg.inv(J @ J.T + 1e-2 * np.eye(y.shape[0])) @ -y
             self.S.step(vel, self.tau, ry.ControlMode.velocity)
 
@@ -764,17 +829,24 @@ class PlayGame:
                 time.sleep(0.01)
                 q = self.S.get_q()
                 self.C.setJointState(q)
-                self.V.setConfiguration(self.C)
+                if self.k % 10 == 0:
+                    self.V.setConfiguration(self.C)
 
                 [y1, J1] = self.C.evalFeature(ry.FS.position, ["Ref_gripperCenter"])
                 y1 = y1 - position
 
                 if bring_back:
-                    [y2, J2] = self.C.evalFeature(ry.FS.position, ["base_footprint"])
-                    y2 = y2 - np.array([p[0], p[1] - 0.55, y2[2]])  # keep the ball closer to the body
+                    [robot_Pos, _] = self.C.evalFeature(ry.FS.position, ["base_footprint"])
+                    theta = math.atan2(p[1] - robot_Pos[1], p[0] - robot_Pos[0])
+                    desiredX = [np.cos(theta), np.sin(theta), 0]
+                    [vectorX, J_x] = self.C.evalFeature(ry.FS.vectorX, ["base_footprint"])
+                    vectorX = vectorX - desiredX
 
-                    y = np.block([y1, y2])
-                    J = np.block([[J1], [J2]])
+                    #[y2, J2] = self.C.evalFeature(ry.FS.position, ["base_footprint"])
+                    #y2 = y2 - np.array([robot_Pos[0] + 0.5*np.cos(theta), robot_Pos[1] + 0.5*np.sin(theta), y2[2]])  # keep the ball closer to the body
+
+                    y = np.block([y1, vectorX])
+                    J = np.block([[J1], [J_x]])
                 else:
                     [robot_Pos, _] = self.C.evalFeature(ry.FS.position, ["base_footprint"])
                     theta = math.atan2(p[1] - robot_Pos[1], p[0] - robot_Pos[0])
@@ -787,7 +859,7 @@ class PlayGame:
                     J = np.block([[J1], [J_x]])
 
                 vel = J.T @ np.linalg.inv(J @ J.T + 1e-2 * np.eye(y.shape[0])) @ -y
-                self.S.step(vel, 0.2, ry.ControlMode.velocity)
+                self.S.step(vel, 0.3, ry.ControlMode.velocity)
 
     def Go_Get_The_Ball_Smart(self, pos):
         p = self.RealWorld.getFrame('target').getPosition()
@@ -807,7 +879,8 @@ class PlayGame:
             time.sleep(0.01)
             q = self.S.get_q()
             self.C.setJointState(q)
-            self.V.setConfiguration(self.C)
+            if self.k % 10 == 0:
+                self.V.setConfiguration(self.C)
 
             [y2, J2] = self.C.evalFeature(ry.FS.position, ["Ref_gripperCenter"])
             y2 = y2 - p
@@ -829,7 +902,8 @@ class PlayGame:
             time.sleep(0.01)
             q = self.S.get_q()
             self.C.setJointState(q)
-            self.V.setConfiguration(self.C)
+            if self.k % 10 == 0:
+                self.V.setConfiguration(self.C)
 
             [y2, J2] = self.C.evalFeature(ry.FS.position, ["Ref_gripperCenter"])
             y2 = y2 - p
@@ -852,7 +926,8 @@ class PlayGame:
             time.sleep(self.tau)
             self.S.step([], 0.01, ry.ControlMode.none)
             self.V.recopyMeshes(self.C)
-            self.V.setConfiguration(self.C)
+            if self.k % 10 == 0:
+                self.V.setConfiguration(self.C)
             if self.S.getGripperIsGrasping('Ref_gripper'):
                 print('Ref robot got the tool')
                 break
@@ -864,18 +939,17 @@ class PlayGame:
         s = Word2Grid((p[0], p[1]))
         f = Word2Grid((pos[0], pos[1]))
         path, status = main(s[0], s[1], f[0], f[1], grid_size=1, robot_radius=40.0, ox=self.ox, oy=self.oy)
-        if status == False:
-            print('Stop===============Status false')
 
         path = Grid2World(path)
         self.followPath(path)
 
         self.S.openGripper("Ref_gripper")  # left the ball
+        self.V.recopyMeshes(self.C)
         for i in range(50):
             time.sleep(0.01)
             self.S.step([], 0.01, ry.ControlMode.none)
-            self.V.recopyMeshes(self.C)
-            self.V.setConfiguration(self.C)
+            if self.k % 10 == 0:
+                self.V.setConfiguration(self.C)
 
         print('Done================================================')
 
@@ -885,7 +959,7 @@ class PlayGame:
             Game.GoToReady_new('R_gripper')
             self.q0 = self.S.get_q()
         else:
-            T = 50  # go to initial positions  (here I was lazy to use IK)
+            T = 40  # go to initial positions  (here I was lazy to use IK)
             self.C.setJointState(self.S.get_q())
             komo = self.C.komo_path(1., T, T * 0.01, True)
             komo.addObjective([1.], ry.FS.qItself, [], ry.OT.eq, [2e1], target=self.q0)
@@ -897,12 +971,23 @@ class PlayGame:
                 self.C.setFrameState(komo.getConfiguration(t))
                 q = self.C.getJointState()
                 self.S.step(q, 0.01, ry.ControlMode.position)
-                self.V.setConfiguration(self.C)
+                if self.k % 10 == 0:
+                    self.V.setConfiguration(self.C)
                 time.sleep(0.01)
 
+    def test(self):
+        leftWin = Game.Both_Arms_Same_Thread()
+        while True:
+            world_position = Game.refereeCamera(desired_radius=50.0, move=True, compute_position=True)
+            Game.k += 1
+            print('world_position ', world_position)
+            # if world_position is not None:
 
-Game = PlayGame(perception='cheat', use_VS=False)
-# Game = PlayGame(perception='opencv', use_VS=False)
+            # if close enough, exit while, and get the ball
+#Game = PlayGame(perception='cheat', use_VS=False)
+Game = PlayGame(perception='opencv', use_VS=False)
+
+#time.sleep(15)
 
 Game.getTool_new('L_gripper')
 Game.getTool_new('R_gripper')
@@ -911,11 +996,12 @@ Game.Arms_go_to_Ready()
 i = 1
 while True:
     leftWin = Game.Both_Arms_Same_Thread()
-    Game.Arms_go_to_Ready(firstTime=False)
+    if Game.use_VS==False:
+        Game.Arms_go_to_Ready(firstTime=False)
     if leftWin:
-        Game.Go_Get_The_Ball_Smart([-.35, .05, 0.4])
+        Game.Go_Get_The_Ball_Smart([-.3, -.07, 0.4])
     else:
-        Game.Go_Get_The_Ball_Smart([.35, -.05, 0.4])
+        Game.Go_Get_The_Ball_Smart([.3, -.07, 0.4])
     Game.Arms_go_to_Ready(firstTime=False)
 
     if i > 3:
@@ -925,14 +1011,3 @@ while True:
 
 Game.kill()
 
-# def mainfunction():
-#    graphviz = GraphvizOutput()
-#    graphviz.output_file = 'basicRAI.png'
-#    with PyCallGraph(output=graphviz):
-#        code_to_profile()
-
-# pycallgraph graphviz -- ./RAI_Project.py
-# if __name__ == '__main__':
-#    mainfunction()
-#
-#    print('Done')
