@@ -12,5 +12,5 @@ This project presents:
 
 Result: https://www.youtube.com/watch?v=3uLs5tedoF8&t=85s
 
-<img src="images/imag.png" />
+<img src="images/img.png" />
 
